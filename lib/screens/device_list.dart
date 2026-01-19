@@ -37,10 +37,6 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
     super.initState();
     _loadDevices();
     
-    // Auto-refresh every 5 seconds
-    //_refreshTimer = Timer.periodic(Duration(seconds: 5), (timer) {
-    //  _loadDevices();
-    //});
   }
 
   @override
@@ -126,7 +122,7 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
           serialNumber: serial,
           personalityConfig: {},
           bleAddress: name,
-          ledCount: deviceType == 'coffee' ? 5 : 2,
+          ledCount: deviceType == 'coffee' ? 3 : 2,
           isConnected: true,
           firstBootComplete: false,
         );
@@ -174,12 +170,6 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
       _connectingLedIndex = 0;
     });
 
-    _connectingTimer = Timer.periodic(Duration(milliseconds: 300), (timer) {
-      setState(() {
-        _connectingLedIndex = (_connectingLedIndex + 1) % 5;
-      });
-    });
-
     try {
       List<Map<String, dynamic>> bleDevices = await _ble.scanForDevices();
       
@@ -199,8 +189,29 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
       bool connected = await _ble.connect(bleDevice);
 
     if (connected) {
-    print(">>> CONNECTION SUCCESSFUL");
-    
+      print(">>> CONNECTION SUCCESSFUL");
+      
+      // NOW start LED cascade AFTER connection is stable
+      _connectingTimer = Timer.periodic(Duration(milliseconds: 300), (timer) async {
+        setState(() {
+          _connectingLedIndex = (_connectingLedIndex + 1) % 3;
+        });
+        
+        List<bool> pattern = List.generate(3, (i) => i <= _connectingLedIndex);
+        try {
+          await _ble.sendLedState(pattern);
+        } catch (e) {
+          print(">>> Error sending LED cascade: $e");
+        }
+      });
+      
+      // Let cascade run for 2 seconds
+      await Future.delayed(Duration(seconds: 2));
+      
+      // Stop cascade
+      _connectingTimer?.cancel();
+      setState(() => _connectingDeviceId = null);
+      
     // Check if this is a NEW device (needs onboarding)
     bool isNewDevice = device.deviceId.startsWith('new-');
     
@@ -403,41 +414,22 @@ class DeviceCard extends StatelessWidget {
               ),
             ),
             
-            // Status or LED indicators
+            // Status indicator  
             if (isOffline)
               Icon(Icons.power_off, color: Colors.grey, size: 24)
             else if (isNew)
               Icon(Icons.chevron_right, color: Color(0xFF0088FF), size: 24)
             else if (isConnecting)
-              Row(
-                children: List.generate(5, (index) {
-                  return Container(
-                    width: 12,
-                    height: 12,
-                    margin: EdgeInsets.symmetric(horizontal: 2),
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: index == connectingLedIndex
-                          ? Color(0xFF0088FF)
-                          : Color(0xFF1A1A1A),
-                    ),
-                  );
-                }),
+              Text(
+                'Connecting...',
+                style: TextStyle(
+                  color: Color(0xFF0088FF),
+                  fontSize: 14,
+                  fontStyle: FontStyle.italic,
+                ),
               )
             else
-              Row(
-                children: List.generate(device.ledCount, (index) {
-                  return Container(
-                    width: 12,
-                    height: 12,
-                    margin: EdgeInsets.symmetric(horizontal: 2),
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: Color(0xFF1A1A1A),
-                    ),
-                  );
-                }),
-              ),
+              Icon(Icons.check_circle, color: Color(0xFF0088FF), size: 20),
           ],
         ),
       ),

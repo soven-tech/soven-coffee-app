@@ -5,6 +5,7 @@ import '../models/device.dart';
 class ApiService {
   
   final String baseUrl = 'https://api.soven.ca';
+  final String apiKey = 'a6ab80229a083849fbc00e99e2d706b7470f33029e9eb9620bacc9489f7274f6';
 
   // Get user's devices
   Future<List<Device>> getUserDevices(String userId) async {
@@ -31,7 +32,7 @@ class ApiService {
     }
   }
   
-  Future<void> registerDevice({
+  Future<Map<String, dynamic>> registerDevice({
     required String userId,
     required String deviceType,
     required String deviceName,
@@ -43,7 +44,10 @@ class ApiService {
     try {
       final response = await http.post(
         Uri.parse('$baseUrl/devices'),
-        headers: {'Content-Type': 'application/json'},
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': apiKey,
+        },
         body: jsonEncode({
           'user_id': userId,
           'device_type': deviceType,
@@ -57,11 +61,16 @@ class ApiService {
       
       if (response.statusCode == 200) {
         print(">>> Device registered successfully");
+        final data = jsonDecode(response.body);
+        print(">>> Received device_id: ${data['device_id']}");
+        return data;  // Return the response containing device_id
       } else {
-        print(">>> Registration failed: ${response.statusCode}");
+        print(">>> Registration failed: ${response.statusCode} - ${response.body}");
+        throw Exception('Registration failed: ${response.statusCode}');
       }
     } catch (e) {
       print('API error registering device: $e');
+      rethrow;
     }
   }
 
@@ -74,7 +83,10 @@ class ApiService {
     try {
       await http.post(
         Uri.parse('$baseUrl/devices/$deviceId/onboarding'),
-        headers: {'Content-Type': 'application/json'},
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': apiKey,
+        },
         body: jsonEncode({
           'ai_name': aiName,
           'location': location,
@@ -97,7 +109,10 @@ class ApiService {
     try {
       await http.post(
         Uri.parse('$baseUrl/messages'),
-        headers: {'Content-Type': 'application/json'},
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': apiKey,
+        },
         body: jsonEncode({
           'user_id': userId,
           'device_id': deviceId,

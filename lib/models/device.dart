@@ -45,7 +45,7 @@ class Device {
       deviceName: json['device_name'],
       personalityConfig: json['personality_config'] ?? {},
       bleAddress: json['ble_address'] ?? '',
-      ledCount: json['led_count'] ?? 5,
+      ledCount: json['led_count'] ?? 3,
       serialNumber: json['serial_number'],  // ADD THIS
       aiName: json['ai_name'],
       firstBootComplete: json['first_boot_complete'] ?? false,

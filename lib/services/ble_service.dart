@@ -69,9 +69,9 @@ class CoffeeMakerBLE {
   void _handleLedUpdate(List<int> value) {
     if (value.isNotEmpty) {
       int ledStateByte = value[0];
-      // Convert byte to list of bools (one per LED)
+      // Convert byte to list of bools (one per LED - 3 LEDs)
       List<bool> ledStates = [];
-      for (int i = 0; i < 5; i++) {
+      for (int i = 0; i < 3; i++) {
         ledStates.add((ledStateByte & (1 << i)) != 0);
       }
       if (onLedStateChange != null) {

@@ -1,13 +1,15 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
-import 'dart:math';
+import 'dart:io';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:audioplayers/audioplayers.dart';
+import 'package:path_provider/path_provider.dart';
 import '../models/device.dart';
 import '../models/user.dart';
 import '../services/ble_service.dart';
 import '../services/api_service.dart';
-import '../services/ollama_service.dart';
+import '../services/soven_api_service.dart';
 
 class DeviceChatScreen extends StatefulWidget {
   final User user;
@@ -28,7 +30,8 @@ class DeviceChatScreen extends StatefulWidget {
 class _DeviceChatScreenState extends State<DeviceChatScreen> {
   late final CoffeeMakerBLE _ble;
   final ApiService _api = ApiService();
-  late final OllamaService _ollama;
+  late final SovenApiService _sovenApi;
+  final AudioPlayer _audioPlayer = AudioPlayer();
   final stt.SpeechToText _speech = stt.SpeechToText();
   final FlutterTts _tts = FlutterTts();
 
@@ -42,7 +45,7 @@ class _DeviceChatScreenState extends State<DeviceChatScreen> {
 
   Timer? _ledAnimationTimer;
   Timer? _idleTimer;
-  int _pulsePhase = 0;
+  final int _pulsePhase = 0;
   int _connectingLedIndex = 0;
 
   String _systemPrompt = '';
@@ -69,13 +72,13 @@ class _DeviceChatScreenState extends State<DeviceChatScreen> {
     _ble = widget.bleService ?? CoffeeMakerBLE();
 
     // Initialize LED states based on device
-    _ledStates = List.filled(widget.device.ledCount, false);
+    _ledStates = List.filled(3, false);
     
     // Build system prompt from device personality
     _systemPrompt = _buildSystemPrompt();
     
-    // Initialize Ollama
-    _ollama = OllamaService(baseUrl: 'http://192.168.40.10:11434');
+    // Initialize Soven API
+    _sovenApi = SovenApiService();
     
     _initializeServices();
   }
@@ -166,18 +169,6 @@ Future<void> _initializeServices() async {
     });
   };
 
-  // Greeting
-  int hour = DateTime.now().hour;
-  String greeting;
-  if (hour < 12) {
-    greeting = "Morning! What can I get you?";
-  } else if (hour < 17) {
-    greeting = "Hey! What can I get you?";
-  } else {
-    greeting = "Evening! What can I get you?";
-  }
-  await _speak(greeting);
-
   // Start idle timeout
   _startIdleTimeout();
 }
@@ -210,44 +201,18 @@ void _allLightsBright() {
     }
   });
   
-  Future.delayed(Duration(seconds: 2), () {
-    // Time-based greeting
-    int hour = DateTime.now().hour;
-    String greeting;
-    if (hour < 12) {
-      greeting = "Morning! What can I get you?";
-    } else if (hour < 17) {
-      greeting = "Hey! What can I get you?";
-    } else {
-      greeting = "Evening! What can I get you?";
-    }
-    _speak(greeting);
-    
-    // Start BLE-synced animation (dots will follow package state)
-  });
 }
 
 void _startIdleAnimation() {
-  // Keep this function as-is for now (BLE sync will eventually replace it)
   _ledAnimationTimer?.cancel();
-  _ledAnimationTimer = Timer.periodic(Duration(milliseconds: 50), (timer) {
-    if (_currentState == "idle" && !_isListening && !_isThinking) {
-      setState(() {
-        _pulsePhase = (_pulsePhase + 1) % 100;
-        double brightness = (sin(_pulsePhase * 0.0628) + 1) / 2;
-        for (int i = 0; i < _ledStates.length; i++) {
-          _ledStates[i] = brightness > 0.3;
-        }
-      });
-    }
-  });
 }
 
 void _startIdleTimeout() {
   _idleTimer?.cancel();
   _idleTimer = Timer(Duration(seconds: 60), () {
     if (!_isListening && !_isThinking) {
-      _speak("Is anybody there?");
+      // Don't use phone TTS for timeout - just restart silently
+      // Or call server for Coqui voice if you want this feature
       _startIdleTimeout(); // Restart timer
     }
   });
@@ -274,8 +239,9 @@ void _resetIdleTimeout() {
   }
 
   Future<void> _speak(String text) async {
+    // DO NOTHING - all speech now comes from server TTS
+    // This function remains for compatibility but doesn't speak
     setState(() => _isThinking = false);
-    await _tts.speak(text);
   }
 
   void _startListening() async {
@@ -331,148 +297,59 @@ void _resetIdleTimeout() {
       return;
     }
 
-    String commandFeedback = ''; 
-    String response = '';          
-
     _resetIdleTimeout();
     
     print(">>> Setting thinking state...");
     setState(() {
       _isThinking = true;
-      _pulsePhase = 0;
-    });
-  
-  print(">>> Starting thinking animation...");
-
-    Timer? thinkingTimer = Timer.periodic(Duration(milliseconds: 30), (timer) {
-      if (!_isThinking) {
-        timer.cancel();
-        return;
-      }
-      setState(() {
-        _pulsePhase = (_pulsePhase + 1) % 50;
-        double brightness = (sin(_pulsePhase * 0.1256) + 1) / 2;
-        for (int i = 0; i < _ledStates.length; i++) {
-          _ledStates[i] = brightness > 0.3;
-        }
-      });
     });
 
-    // Save user message to API
-    await _api.saveMessage(
-      userId: widget.user.userId,
-      deviceId: widget.device.deviceId,
-      role: 'user',
-      content: text,
-      deviceState: _currentState,
-    );
-
-    // Add to conversation history
-    _conversationHistory.add({'role': 'user', 'content': text});
-
-    // Check for device commands
-    String lowerText = text.toLowerCase();
-
-    // Brew detection - look for intent, not exact phrases
-    bool wantsBrew = (
-      (lowerText.contains("brew") || 
-      lowerText.contains("make") || 
-      lowerText.contains("start")) &&
-      (lowerText.contains("coffee") || 
-      lowerText.contains("brew") ||
-      lowerText.contains("pot"))
-    ) && !lowerText.contains("stop");
-
-    bool wantsStop = (
-      lowerText.contains("stop") || 
-      lowerText.contains("cancel") ||
-      lowerText.contains("turn off")
-    );
-
-    if (wantsBrew) {
-      if (_isConnected) {
-        await _ble.sendCommand("start_brew");
-        commandFeedback = '[You just started brewing coffee]';
-      }
-    } else if (wantsStop) {
-      if (_isConnected) {
-        await _ble.sendCommand("stop_brew");
-        commandFeedback = '[You just stopped brewing]';
-      }
-    }
-
-    // Trim old messages but keep system prompt
-    List<Map<String, String>> contextToSend = [];
-
-    // Always include latest system prompt
-    contextToSend.add({'role': 'system', 'content': _systemPrompt});
-
-    // Add last 10 messages, BUT filter out:
-    // 1. Empty messages
-    // 2. System messages (except the one we just added)
-    int startIndex = max(0, _conversationHistory.length - 10);
-    for (var msg in _conversationHistory.sublist(startIndex)) {
-      // Skip empty content
-      if (msg['content'] == null || msg['content']!.trim().isEmpty) {
-        print(">>> Skipping empty message: $msg");
-        continue;
-      }
-      
-      // Skip system messages (we already have one at the top)
-      if (msg['role'] == 'system') {
-        print(">>> Skipping duplicate system message");
-        continue;
-      }
-      
-      // Add valid user/assistant messages
-      contextToSend.add(msg);
-    }
-    
-    // Current message only
-    contextToSend.add({'role': 'user', 'content': text});
-
-    // Get AI response
-    print(">>> Sending to Ollama: ${contextToSend.length} messages");
     try {
-      response = await _ollama.chat(contextToSend);
-      print(">>> Got Ollama response: '$response'");
+      // Call Soven server API instead of Ollama directly
+      print(">>> Sending to Soven server...");
       
-      // DON'T ADD EMPTY RESPONSES TO HISTORY
-      if (response.trim().isEmpty) {
-        print(">>> ERROR: Ollama returned empty response!");
-        await _speak("Sorry, my brain froze. Can you try again?");
-        setState(() => _isThinking = false);
-        thinkingTimer.cancel();
-        return;
-      }
-      
-      // Add AI response to history (ONLY if not empty)
-      _conversationHistory.add({'role': 'assistant', 'content': response});
-      
-      // Save AI response to API
-      await _api.saveMessage(
+      final response = await _sovenApi.sendMessage(
+        userInput: text,
         userId: widget.user.userId,
         deviceId: widget.device.deviceId,
-        role: 'assistant',
-        content: response,
-        deviceState: _currentState,
+        voiceConfig: widget.device.personalityConfig['voice'],
       );
+
+      print(">>> Got response: ${response.aiResponse}");
+      print(">>> Commands: ${response.commands}");
+
+      // Execute BLE commands
+      if (_isConnected) {
+        for (String command in response.commands) {
+          print(">>> Executing command: $command");
+          await _ble.sendCommand(command);
+        }
+      }
+
+      // Get and play TTS audio
+      print(">>> Fetching audio...");
+      final audioBytes = await _sovenApi.getAudioFile(response.audioFilename);
       
-    } catch (e) {
-      print(">>> OLLAMA ERROR: $e");
-      await _speak("Sorry, I'm having trouble thinking right now.");
+      print(">>> Playing audio (${audioBytes.length} bytes)...");
+      
+      // Save to temp file and play
+      final tempDir = await getTemporaryDirectory();
+      final tempFile = File('${tempDir.path}/${response.audioFilename}');
+      await tempFile.writeAsBytes(audioBytes);
+      
+      await _audioPlayer.play(DeviceFileSource(tempFile.path));
+      
       setState(() => _isThinking = false);
-      thinkingTimer.cancel();
-      return;
+      
+      // Return to idle animation
+      _startIdleAnimation();
+
+    } catch (e) {
+      print(">>> ERROR: $e");
+      await _speak("Sorry, I'm having trouble right now.");
+      setState(() => _isThinking = false);
+      _startIdleAnimation();
     }
-
-    thinkingTimer.cancel();
-
-    // Speak response
-    await _speak(response);
-
-    // Return to idle animation
-    _startIdleAnimation();
   }
 
   @override
@@ -482,6 +359,7 @@ void _resetIdleTimeout() {
     _ble.disconnect();
     _speech.cancel();
     _tts.stop();
+    _audioPlayer.dispose();
     super.dispose();
   }
 
@@ -514,7 +392,7 @@ void _resetIdleTimeout() {
                 // LED status indicators
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
-                  children: List.generate(_ledStates.length, (index) {
+                  children: List.generate(3, (index) {
                     // Calculate brightness based on state
                     Color ledColor;
                     List<BoxShadow>? ledShadow;

@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
-import 'package:flutter_tts/flutter_tts.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import '../models/user.dart';
 import '../models/device.dart';
 import '../services/ble_service.dart';
 import '../services/api_service.dart';
+import '../services/soven_api_service.dart';
 import 'device_chat.dart';
 
 class OnboardingScreen extends StatefulWidget {
@@ -25,10 +25,11 @@ class OnboardingScreen extends StatefulWidget {
 }
 
 class _OnboardingScreenState extends State<OnboardingScreen> {
-  // ... rest of the code stays the same
   final stt.SpeechToText _speech = stt.SpeechToText();
-  final FlutterTts _tts = FlutterTts();
   final ApiService _api = ApiService();
+  final SovenApiService _sovenApi = SovenApiService();
+  
+  final TextEditingController _textController = TextEditingController();
   
   int _currentStep = 0;
   bool _isListening = false;
@@ -37,8 +38,9 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   String? _userName;
   String? _aiName;
   String? _personalityDescription;
+  Map<String, dynamic>? _selectedVoice;
   
-  List<bool> _ledStates = List.filled(5, false);
+  List<bool> _ledStates = List.filled(3, false);
 
   @override
   void initState() {
@@ -49,22 +51,19 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
 
   Future<void> _initializeSpeech() async {
     bool available = await _speech.initialize(
-      onError: (error) => print(">>> Speech init error: $error"),
-      onStatus: (status) => print(">>> Speech init status: $status"),
+      onError: (error) => print(">>> Speech error: $error"),
+      onStatus: (status) => print(">>> Speech status: $status"),
     );
     
     if (!available) {
-      print(">>> Speech recognition not available on this device");
+      print(">>> Speech recognition not available");
     } else {
-      print(">>> Speech recognition initialized successfully");
+      print(">>> Speech recognition initialized");
     }
-    
-    await _tts.setLanguage("en-US");
-    await _tts.setSpeechRate(0.5);
   }
 
   Future<void> _startOnboarding() async {
-    // Wait for speech to be fully initialized
+    // Wait for speech initialization
     bool available = _speech.isAvailable;
     int attempts = 0;
     
@@ -74,83 +73,60 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       attempts++;
     }
     
-    // Extra delay after permission granted
-    await Future.delayed(Duration(seconds: 1));
     _askQuestion(0);
   }
 
-  Future<void> _askQuestion(int step) async {
+  void _askQuestion(int step) {
     setState(() {
       _currentStep = step;
-      _ledStates = List.filled(5, false);
+      _textController.clear();
       
-      // Light up LEDs based on progress
-      int ledsToLight = (step / 3 * 5).ceil().clamp(1, 5);
-      for (int i = 0; i < ledsToLight; i++) {
+      // Update LED progress (3 LEDs for 3 questions)
+      _ledStates = List.filled(3, false);
+      for (int i = 0; i <= step && i < 3; i++) {
         _ledStates[i] = true;
+      }
+      
+      // Set question text
+      switch (step) {
+        case 0:
+          _currentQuestion = "What's your name?";
+          break;
+        case 1:
+          _currentQuestion = "What should I call myself?";
+          break;
+        case 2:
+          _currentQuestion = "Describe my personality";
+          if (_textController.text.isEmpty) {
+          _textController.clear();
+          }
+          break;
+
+        default:
+          _currentQuestion = '';
       }
     });
     
     // Send LED state to package
-    print(">>> Attempting to send LED state to package...");
-    try {
-      await widget.bleService.sendLedState(_ledStates);
-      print(">>> LED state sent successfully");
-    } catch (e) {
-      print(">>> ERROR sending LED state: $e");
-    }
-    
-    String question;
-    switch (step) {
-      case 0:
-        question = "Hi! I'm your new Soven coffee maker. What's your name?";
-        break;
-      case 1:
-        question = "Hi $_userName! What do you want to call me?";
-        break;
-      case 2:
-        question = "So you want to call me $_aiName?";
-        break;
-      case 3:
-        question = "Perfect! I'm $_aiName. Now, tell me about my personality. What vibe should I have?";
-        break;
-      default:
-        return;
-    }
-    
-    setState(() => _currentQuestion = question);
-    await _speak(question);
-    await Future.delayed(Duration(seconds: 2));
-
-  }
-
-  Future<void> _speak(String text) async {
-    await _tts.speak(text);
+    widget.bleService.sendLedState(_ledStates).catchError((e) {
+      print(">>> LED error: $e");
+    });
   }
 
   Future<void> _startListening() async {
     if (!_isListening && _speech.isAvailable) {
-      // Longer timeout for personality question
-      int timeout = _currentStep == 3 ? 60 : 30;
-      
       await _speech.listen(
         onResult: (result) {
-          print(">>> Speech result: ${result.recognizedWords}");
-          if (result.finalResult) {
-            _handleResponse(result.recognizedWords);
-          }
+          setState(() {
+            _textController.text = result.recognizedWords;
+          });
         },
-        listenOptions: stt.SpeechListenOptions(
-          listenMode: stt.ListenMode.confirmation,
-          cancelOnError: true,
-          partialResults: true,
-        ),
-        listenFor: Duration(seconds: timeout),
-        pauseFor: Duration(seconds: 5),
+        listenFor: Duration(seconds: 30),
+        pauseFor: Duration(seconds: 3),
       );
       
       setState(() => _isListening = true);
-      print(">>> Speech listening started");
+      print(">>> Listening started");
     }
   }
 
@@ -158,155 +134,165 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     if (_isListening) {
       _speech.stop();
       setState(() => _isListening = false);
-      print(">>> Speech listening stopped");
+      print(">>> Listening stopped");
     }
   }
 
-  String _parseName(String response) {
-    // For "I want to call you X" or "call you X"
-    if (response.toLowerCase().contains('call you') || 
-        response.toLowerCase().contains('call me')) {
-      List<String> words = response.split(' ');
-      int callIndex = words.indexWhere((w) => w.toLowerCase() == 'you' || w.toLowerCase() == 'me');
-      if (callIndex >= 0 && callIndex < words.length - 1) {
-        // Get word after "you"/"me"
-        String name = words[callIndex + 1];
-        // Capitalize first letter
-        return name[0].toUpperCase() + name.substring(1).toLowerCase();
-      }
-    }
+  void _handleContinue() {
+    String input = _textController.text.trim();
     
-    // Remove common phrases and get last capitalized word
-    String cleaned = response
-      .replaceAll(RegExp(r"my name is", caseSensitive: false), "")
-      .replaceAll(RegExp(r"i'm", caseSensitive: false), "")
-      .replaceAll(RegExp(r"i am", caseSensitive: false), "")
-      .replaceAll(RegExp(r"call me", caseSensitive: false), "")
-      .replaceAll(RegExp(r"call you", caseSensitive: false), "")
-      .replaceAll(RegExp(r"it's", caseSensitive: false), "")
-      .replaceAll(RegExp(r"i want to", caseSensitive: false), "")
-      .trim();
-    
-    // Get last capitalized word
-    List<String> words = cleaned.split(' ');
-    for (int i = words.length - 1; i >= 0; i--) {
-      String word = words[i];
-      if (word.isNotEmpty && word[0] == word[0].toUpperCase()) {
-        return word;
-      }
+    if (input.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Please provide an answer')),
+      );
+      return;
     }
-  
-    // Fallback: last word, capitalize it
-    if (words.isNotEmpty) {
-      String word = words.last;
-      return word[0].toUpperCase() + word.substring(1).toLowerCase();
-    }
-
-    return cleaned;
-  }
-
-  bool _isConfirmation(String response) {
-    String lower = response.toLowerCase().trim();
-    List<String> yesWords = ['yes', 'yeah', 'yep', 'correct', 'right', 'sure', 'yup', 'ok', 'okay'];
-    List<String> noWords = ['no', 'nope', 'nah', 'wrong', 'incorrect'];
-    
-    for (String word in yesWords) {
-      if (lower.contains(word)) return true;
-    }
-    for (String word in noWords) {
-      if (lower.contains(word)) return false;
-    }
-    
-    // Default to yes if unclear
-    return true;
-  }
-
-  Future<void> _handleResponse(String response) async {
-    _stopListening();
-    
-    print(">>> Step $_currentStep response: $response");
     
     switch (_currentStep) {
       case 0:
-        // Q1: Get user name
-        _userName = _parseName(response);
-        print(">>> Parsed user name: $_userName");
-        await Future.delayed(Duration(milliseconds: 300));
+        _userName = _parseName(input);
+        print(">>> User name: $_userName");
         _askQuestion(1);
         break;
         
       case 1:
-        // Q2: Get AI name
-        _aiName = _parseName(response);
-        print(">>> Parsed AI name: $_aiName");
-        await Future.delayed(Duration(milliseconds: 300));
+        _aiName = _parseName(input);
+        print(">>> AI name: $_aiName");
         _askQuestion(2);
         break;
         
       case 2:
-        // Q2.5: Confirm AI name
-        bool confirmed = _isConfirmation(response);
-        print(">>> Name confirmation: $confirmed");
-        
-        if (confirmed) {
-          await Future.delayed(Duration(milliseconds: 300));
-          _askQuestion(3);
-        } else {
-          _aiName = null;  // ← Clear the bad name
-          await _speak("Okay, let's try again. What do you want to call me?");
-          await Future.delayed(Duration(milliseconds: 500));
-          _askQuestion(1); // Go back to Q2
-        }
-        break;
-        
-      case 3:
-        // Q3: Get personality
-        _personalityDescription = response;
+        _personalityDescription = input;
         print(">>> Personality: $_personalityDescription");
-        await _completeOnboarding();
+        _completeOnboarding();
         break;
     }
   }
 
+  void _handleBack() {
+    if (_currentStep > 0) {
+      _askQuestion(_currentStep - 1);
+    } else {
+      Navigator.pop(context);
+    }
+  }
+
+  String _parseName(String input) {
+    String lower = input.toLowerCase().trim();
+    
+    // Try to extract name after trigger phrases
+    List<String> triggerPhrases = [
+      'call yourself ',
+      'call you ',
+      'call me ',
+      'my name is ',
+      'i am ',
+      'i\'m ',
+    ];
+    
+    for (String trigger in triggerPhrases) {
+      if (lower.contains(trigger)) {
+        int startIndex = lower.indexOf(trigger) + trigger.length;
+        String remainder = input.substring(startIndex).trim();
+        
+        // Get first word after trigger
+        List<String> words = remainder.split(' ');
+        if (words.isNotEmpty && words.first.isNotEmpty) {
+          String name = words.first.replaceAll(RegExp(r'[^a-zA-Z]'), '');
+          if (name.isNotEmpty) {
+            return name[0].toUpperCase() + name.substring(1).toLowerCase();
+          }
+        }
+      }
+    }
+    
+    // Fallback: just take first word
+    List<String> words = input.trim().split(' ');
+    if (words.isNotEmpty) {
+      String name = words.first.replaceAll(RegExp(r'[^a-zA-Z]'), '');
+      if (name.isNotEmpty) {
+        return name[0].toUpperCase() + name.substring(1).toLowerCase();
+      }
+    }
+    
+    return "Assistant"; // Final fallback
+  }
+
   Future<void> _completeOnboarding() async {
-    // Light up all LEDs
-    setState(() => _ledStates = List.filled(5, true));
+    // Show loading - all 3 LEDs on
+    setState(() => _ledStates = List.filled(3, true));
     await widget.bleService.sendLedState(_ledStates);
     
-    await _speak("Perfect! Give me a moment to set everything up.");
+    // Show loading dialog
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => Center(
+        child: Card(
+          child: Padding(
+            padding: EdgeInsets.all(32),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Setting up $_aiName...'),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
     
-    // Wait for connection to stabilize
-    await Future.delayed(Duration(milliseconds: 1000));
+    // CREATE PERSONALITY ON SERVER
+    print(">>> Creating personality on server...");
+    try {
+      final personalityResult = await _sovenApi.createPersonality(
+        name: _aiName!,
+        description: _personalityDescription ?? 'helpful and friendly',
+        preferAmerican: true,
+      );
+      
+      _selectedVoice = personalityResult['voice'];
+      print(">>> Voice selected: ${_selectedVoice!['speaker']}");
+    } catch (e) {
+      print(">>> ERROR creating personality: $e");
+      _selectedVoice = {
+        'voice_id': 'p297',
+        'model': 'tts_models/en/vctk/vits'
+      };
+    }
     
-    // Send name to ESP32
-    print(">>> Sending name '$_aiName' to ESP32...");
+    // Send name to ESP32 (it will restart immediately)
+    print(">>> Sending name to ESP32...");
     try {
       await widget.bleService.sendCommand('set_name:$_aiName');
-      print(">>> Name command sent, device will restart...");
+      print(">>> Name sent, device will restart...");
     } catch (e) {
-      print(">>> ERROR sending name: $e");
+      print(">>> Send error (expected if device restarts quickly): $e");
+      // Error is often expected - device may restart before acknowledging
     }
     
-    // Wait for ESP32 to receive command and restart
-    print(">>> Waiting 4 seconds for device to restart...");
-    await Future.delayed(Duration(seconds: 4));
+    // Wait longer for full boot cycle (ESP32 boot takes ~3-5 seconds)
+    print(">>> Waiting for device to restart and boot...");
+    await Future.delayed(Duration(seconds: 7));
     
-    // Disconnect old connection
-    print(">>> Disconnecting old connection...");
+    // Try to disconnect if still connected
     try {
-      await widget.bleService.disconnect();
+      if (widget.bleService.isConnected) {
+        await widget.bleService.disconnect();
+      }
     } catch (e) {
-      print(">>> Disconnect error (expected): $e");
+      print(">>> Disconnect: $e (device may have already disconnected)");
     }
     
-    // Wait a moment
-    await Future.delayed(Duration(seconds: 1));
+    // Wait a moment before scanning
+    await Future.delayed(Duration(seconds: 2));
     
-    // Scan for device with NEW name (same serial)
-    print(">>> Scanning for device with new name '$_aiName'...");
+    // Reconnect
+    print(">>> Scanning for renamed device...");
     List<Map<String, dynamic>> bleDevices = await widget.bleService.scanForDevices();
     
-    // Find device by serial (name changed but serial is same)
     var targetDevice = bleDevices.firstWhere(
       (bleData) => bleData['serial'] == widget.device.serialNumber,
       orElse: () => <String, dynamic>{},
@@ -314,47 +300,35 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     
     if (targetDevice.isNotEmpty) {
       BluetoothDevice bleDevice = targetDevice['device'] as BluetoothDevice;
-      print(">>> Found device, reconnecting...");
-      
-      bool reconnected = await widget.bleService.connect(bleDevice);
-      
-      if (reconnected) {
-        print(">>> Reconnected successfully!");
-      } else {
-        print(">>> Reconnection failed");
-      }
-    } else {
-      print(">>> ERROR: Could not find device with serial ${widget.device.serialNumber}");
+      await widget.bleService.connect(bleDevice);
     }
     
-    // Register in database WITH personality
+    // Register device and capture the device_id from server
+    String? registeredDeviceId;
     try {
       print(">>> Registering device in database...");
-      await _api.registerDevice(
+      final registrationResponse = await _api.registerDevice(
         userId: widget.user.userId,
         deviceType: widget.device.deviceType,
         deviceName: _aiName!,
         aiName: _aiName!,
         bleAddress: _aiName!,
-        ledCount: widget.device.ledCount,
+        ledCount: 3,
         serialNumber: widget.device.serialNumber!,
       );
-      print(">>> Device registered successfully");
+      registeredDeviceId = registrationResponse['device_id'];
+      print(">>> Device registered with ID: $registeredDeviceId");
     } catch (e) {
       print(">>> Registration error: $e");
     }
     
-    await _speak("All set! Let's make some coffee, $_userName.");
+    // Close loading dialog
+    if (mounted) Navigator.pop(context);
     
     // Navigate to chat
-    await Future.delayed(Duration(seconds: 2));
-    
     if (mounted) {
-      // Create updated device object with personality
       Device updatedDevice = Device(
-        deviceId: widget.device.deviceId.startsWith('new-') 
-          ? DateTime.now().millisecondsSinceEpoch.toString()
-          : widget.device.deviceId,
+        deviceId: registeredDeviceId ?? widget.device.deviceId,  // USE SERVER-GENERATED ID
         userId: widget.user.userId,
         deviceType: widget.device.deviceType,
         deviceName: _aiName!,
@@ -363,14 +337,16 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
         personalityConfig: {
           'personality': _personalityDescription ?? 'helpful',
           'interests': ['coffee', 'conversation'],
+          'voice': _selectedVoice ?? {
+            'voice_id': 'p297',
+            'model': 'tts_models/en/vctk/vits'
+          },
         },
         bleAddress: _aiName!,
-        ledCount: widget.device.ledCount,
+        ledCount: 3,
         isConnected: true,
         firstBootComplete: true,
       );
-      
-      print(">>> BLE connected before navigation: ${widget.bleService.isConnected}");
       
       Navigator.pushReplacement(
         context,
@@ -389,20 +365,28 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.white,
+      appBar: AppBar(
+        backgroundColor: Colors.white,
+        elevation: 0,
+        leading: IconButton(
+          icon: Icon(Icons.arrow_back, color: Colors.black87),
+          onPressed: _handleBack,
+        ),
+      ),
       body: SafeArea(
         child: Padding(
-          padding: EdgeInsets.all(32),
+          padding: EdgeInsets.all(24),
           child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // LED Indicator
+              // LED Progress Indicators
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
-                children: List.generate(5, (index) {
+                children: List.generate(3, (index) {
                   return Container(
-                    margin: EdgeInsets.symmetric(horizontal: 8),
-                    width: 20,
-                    height: 20,
+                    margin: EdgeInsets.symmetric(horizontal: 6),
+                    width: 16,
+                    height: 16,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
                       color: _ledStates[index] 
@@ -413,64 +397,95 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                 }),
               ),
               
-              SizedBox(height: 60),
+              SizedBox(height: 48),
               
-              // Question Text
+              // Question
               Text(
                 _currentQuestion,
-                textAlign: TextAlign.center,
                 style: TextStyle(
-                  fontSize: 24,
-                  fontWeight: FontWeight.w500,
+                  fontSize: 28,
+                  fontWeight: FontWeight.w600,
                   color: Colors.black87,
                 ),
               ),
               
-              SizedBox(height: 60),
+              SizedBox(height: 32),
               
-              // Push-to-Talk Button (replaces auto-listen indicator)
-              GestureDetector(
-                onTapDown: (_) {
-                  if (!_isListening) {
-                    _startListening();
-                  }
-                },
-                onTapUp: (_) {
-                  if (_isListening) {
-                    _stopListening();
-                  }
-                },
-                onTapCancel: () {
-                  if (_isListening) {
-                    _stopListening();
-                  }
-                },
-                child: Container(
-                  width: 100,
-                  height: 100,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: _isListening 
-                      ? Color(0xFF0088FF) 
-                      : Colors.grey.shade300,
+              // Text Input Field
+              TextField(
+                controller: _textController,
+                style: TextStyle(fontSize: 18),
+                maxLines: _currentStep == 2 ? 4 : 1,
+                decoration: InputDecoration(
+                  hintText: _currentStep == 2 
+                    ? 'Example: A grad student, encouraging but not chipper' 
+                    : 'Type here...',
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
                   ),
-                  child: Icon(
-                    Icons.mic,
-                    size: 50,
-                    color: Colors.white,
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: Color(0xFF0088FF), width: 2),
                   ),
                 ),
               ),
               
-              SizedBox(height: 16),
+              SizedBox(height: 24),
               
-              Text(
-                _isListening ? 'Release to send' : 'Hold to speak',
-                style: TextStyle(
-                  fontSize: 18,
-                  color: _isListening 
-                    ? Color(0xFF0088FF) 
-                    : Colors.grey.shade600,
+              // Voice Input Button
+              GestureDetector(
+                onTapDown: (_) => _startListening(),
+                onTapUp: (_) => _stopListening(),
+                onTapCancel: () => _stopListening(),
+                child: Container(
+                  padding: EdgeInsets.all(20),
+                  decoration: BoxDecoration(
+                    color: _isListening 
+                      ? Color(0xFF0088FF) 
+                      : Colors.grey.shade200,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(
+                        Icons.mic,
+                        color: _isListening ? Colors.white : Colors.black54,
+                        size: 28,
+                      ),
+                      SizedBox(width: 12),
+                      Text(
+                        _isListening ? 'Listening...' : 'Hold to speak',
+                        style: TextStyle(
+                          fontSize: 18,
+                          color: _isListening ? Colors.white : Colors.black54,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              
+              Spacer(),
+              
+              // Continue Button
+              ElevatedButton(
+                onPressed: _handleContinue,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Color(0xFF0088FF),
+                  padding: EdgeInsets.symmetric(vertical: 16),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                child: Text(
+                  _currentStep == 2 ? 'Complete Setup' : 'Continue',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.white,
+                  ),
                 ),
               ),
             ],
@@ -483,7 +498,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   @override
   void dispose() {
     _speech.stop();
-    _tts.stop();
+    _textController.dispose();
     super.dispose();
   }
 }
