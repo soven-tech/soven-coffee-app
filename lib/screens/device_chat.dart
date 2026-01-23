@@ -312,6 +312,7 @@ void _resetIdleTimeout() {
         userInput: text,
         userId: widget.user.userId,
         deviceId: widget.device.deviceId,
+        userName: widget.user.name,
         voiceConfig: widget.device.personalityConfig['voice'],
       );
 

@@ -65,6 +65,7 @@ class SovenApiService {
     required String userInput,
     required String userId,
     required String deviceId,
+    String? userName,  // Add this parameter
     Map<String, dynamic>? voiceConfig,
   }) async {
     try {
