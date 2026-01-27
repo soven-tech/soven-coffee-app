@@ -7,6 +7,8 @@ import '../services/ble_service.dart';
 import '../services/api_service.dart';
 import '../services/soven_api_service.dart';
 import 'device_chat.dart';
+import 'dart:convert'; 
+import 'package:http/http.dart' as http; 
 
 class OnboardingScreen extends StatefulWidget {
   final User user;
@@ -96,12 +98,11 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
           _currentQuestion = "What should I call myself?";
           break;
         case 2:
-          _currentQuestion = "Describe my personality";
+          _currentQuestion = "Tell me about $_aiName's origins\n\nWho raised them? What was their upbringing like?";
           if (_textController.text.isEmpty) {
-          _textController.clear();
+            _textController.text = "Example: $_aiName's mom ran a small diner...";
           }
           break;
-
         default:
           _currentQuestion = '';
       }
@@ -219,147 +220,163 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   }
 
   Future<void> _completeOnboarding() async {
-    // Show loading - all 3 LEDs on
-    setState(() => _ledStates = List.filled(3, true));
-    await widget.bleService.sendLedState(_ledStates);
-    
-    // Show loading dialog
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) => Center(
-        child: Card(
-          child: Padding(
-            padding: EdgeInsets.all(32),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                CircularProgressIndicator(),
-                SizedBox(height: 16),
-                Text('Setting up $_aiName...'),
-              ],
+      // Show loading - all 3 LEDs on
+      setState(() => _ledStates = List.filled(3, true));
+      await widget.bleService.sendLedState(_ledStates);
+      
+      // Show loading dialog
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => Center(
+          child: Card(
+            child: Padding(
+              padding: EdgeInsets.all(32),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  CircularProgressIndicator(),
+                  SizedBox(height: 16),
+                  Text('Setting up $_aiName...'),
+                ],
+              ),
             ),
           ),
         ),
-      ),
-    );
-    
-    // CREATE PERSONALITY ON SERVER
-    print(">>> Creating personality on server...");
-    try {
-      final personalityResult = await _sovenApi.createPersonality(
-        name: _aiName!,
-        description: _personalityDescription ?? 'helpful and friendly',
-        preferAmerican: true,
       );
       
-      _selectedVoice = personalityResult['voice'];
-      print(">>> Voice selected: ${_selectedVoice!['speaker']}");
-    } catch (e) {
-      print(">>> ERROR creating personality: $e");
-      _selectedVoice = {
-        'voice_id': 'p297',
-        'model': 'tts_models/en/vctk/vits'
-      };
-    }
-    
-    // Send name to ESP32 (it will restart immediately)
-    print(">>> Sending name to ESP32...");
-    try {
-      await widget.bleService.sendCommand('set_name:$_aiName');
-      print(">>> Name sent, device will restart...");
-    } catch (e) {
-      print(">>> Send error (expected if device restarts quickly): $e");
-      // Error is often expected - device may restart before acknowledging
-    }
-    
-    // Wait longer for full boot cycle (ESP32 boot takes ~3-5 seconds)
-    print(">>> Waiting for device to restart and boot...");
-    await Future.delayed(Duration(seconds: 7));
-    
-    // Try to disconnect if still connected
-    try {
-      if (widget.bleService.isConnected) {
-        await widget.bleService.disconnect();
+      // Send name to ESP32 (it will restart immediately)
+      print(">>> Sending name to ESP32...");
+      try {
+        await widget.bleService.sendCommand('set_name:$_aiName');
+        print(">>> Name sent, device will restart...");
+      } catch (e) {
+        print(">>> Send error (expected if device restarts quickly): $e");
       }
-    } catch (e) {
-      print(">>> Disconnect: $e (device may have already disconnected)");
-    }
-    
-    // Wait a moment before scanning
-    await Future.delayed(Duration(seconds: 2));
-    
-    // Reconnect
-    print(">>> Scanning for renamed device...");
-    List<Map<String, dynamic>> bleDevices = await widget.bleService.scanForDevices();
-    
-    var targetDevice = bleDevices.firstWhere(
-      (bleData) => bleData['serial'] == widget.device.serialNumber,
-      orElse: () => <String, dynamic>{},
-    );
-    
-    if (targetDevice.isNotEmpty) {
-      BluetoothDevice bleDevice = targetDevice['device'] as BluetoothDevice;
-      await widget.bleService.connect(bleDevice);
-    }
-    
-    // Register device and capture the device_id from server
-    String? registeredDeviceId;
-    try {
-      print(">>> Registering device in database...");
-      final registrationResponse = await _api.registerDevice(
-        userId: widget.user.userId,
-        deviceType: widget.device.deviceType,
-        deviceName: _aiName!,
-        aiName: _aiName!,
-        bleAddress: _aiName!,
-        ledCount: 3,
-        serialNumber: widget.device.serialNumber!,
+      
+      // Wait for ESP32 restart
+      print(">>> Waiting for device to restart and boot...");
+      await Future.delayed(Duration(seconds: 7));
+      
+      // Try to disconnect if still connected
+      try {
+        if (widget.bleService.isConnected) {
+          await widget.bleService.disconnect();
+        }
+      } catch (e) {
+        print(">>> Disconnect: $e (device may have already disconnected)");
+      }
+      
+      await Future.delayed(Duration(seconds: 2));
+      
+      // Reconnect
+      print(">>> Scanning for renamed device...");
+      List<Map<String, dynamic>> bleDevices = await widget.bleService.scanForDevices();
+      
+      var targetDevice = bleDevices.firstWhere(
+        (bleData) => bleData['serial'] == widget.device.serialNumber,
+        orElse: () => <String, dynamic>{},
       );
-      registeredDeviceId = registrationResponse['device_id'];
-      print(">>> Device registered with ID: $registeredDeviceId");
-    } catch (e) {
-      print(">>> Registration error: $e");
-    }
-    
-    // Close loading dialog
-    if (mounted) Navigator.pop(context);
-    
-    // Navigate to chat
-    if (mounted) {
-      Device updatedDevice = Device(
-        deviceId: registeredDeviceId ?? widget.device.deviceId,  // USE SERVER-GENERATED ID
-        userId: widget.user.userId,
-        deviceType: widget.device.deviceType,
-        deviceName: _aiName!,
-        aiName: _aiName!,
-        serialNumber: widget.device.serialNumber,
-        personalityConfig: {
-          'personality': _personalityDescription ?? 'helpful',
-          'interests': ['coffee', 'conversation'],
-          'voice': _selectedVoice ?? {
+      
+      if (targetDevice.isNotEmpty) {
+        BluetoothDevice bleDevice = targetDevice['device'] as BluetoothDevice;
+        await widget.bleService.connect(bleDevice);
+      }
+      
+      // Register device and capture the device_id from server
+      String? registeredDeviceId;
+      try {
+        print(">>> Registering device in database...");
+        final registrationResponse = await _api.registerDevice(
+          userId: widget.user.userId,
+          deviceType: widget.device.deviceType,
+          deviceName: _aiName!,
+          aiName: _aiName!,
+          bleAddress: _aiName!,
+          ledCount: 3,
+          serialNumber: widget.device.serialNumber!,
+        );
+        registeredDeviceId = registrationResponse['device_id'];
+        print(">>> Device registered with ID: $registeredDeviceId");
+      } catch (e) {
+        print(">>> Registration error: $e");
+      }
+      
+      // ====== ADD THIS NEW SECTION HERE ======
+      // CREATE ENTITY WITH ORIGIN STORY (after registration)
+      if (registeredDeviceId != null) {
+        print(">>> Creating entity with origin story...");
+        try {
+          final response = await http.post(
+            Uri.parse('${SovenApiService.baseUrl}/api/onboarding/create-with-origin'),
+            headers: {
+              'Content-Type': 'application/json',
+              'X-API-Key': SovenApiService.apiKey,
+            },
+            body: jsonEncode({
+              'user_id': widget.user.userId,
+              'device_id': registeredDeviceId,
+              'ai_name': _aiName!,
+              'origin_story': _personalityDescription!,
+              'prefer_american': true,
+            }),
+          );
+          
+          if (response.statusCode == 200) {
+            final result = jsonDecode(response.body);
+            _selectedVoice = result['voice_config'];
+            print(">>> DNA generated: ${result['dna_parameters']}");
+            print(">>> Narrative: ${result['narrative_context']}");
+            print(">>> Voice selected: ${_selectedVoice!['speaker']}");
+          }
+        } catch (e) {
+          print(">>> ERROR creating entity with origin: $e");
+          _selectedVoice = {
             'voice_id': 'p297',
             'model': 'tts_models/en/vctk/vits'
-          },
-        },
-        bleAddress: _aiName!,
-        ledCount: 3,
-        isConnected: true,
-        firstBootComplete: true,
-      );
+          };
+        }
+      }
+      // ====== END NEW SECTION ======
       
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(
-          builder: (context) => DeviceChatScreen(
-            user: widget.user,
-            device: updatedDevice,
-            bleService: widget.bleService,
+      // Close loading dialog
+      if (mounted) Navigator.pop(context);
+      
+      // Navigate to chat
+      if (mounted) {
+        Device updatedDevice = Device(
+          deviceId: registeredDeviceId ?? widget.device.deviceId,
+          userId: widget.user.userId,
+          deviceType: widget.device.deviceType,
+          deviceName: _aiName!,
+          aiName: _aiName!,
+          serialNumber: widget.device.serialNumber,
+          personalityConfig: {
+            'personality': _personalityDescription ?? 'helpful',
+            'interests': ['coffee', 'conversation'],
+            'voice': _selectedVoice ?? {
+              'voice_id': 'p297',
+              'model': 'tts_models/en/vctk/vits'
+            },
+          },
+          bleAddress: _aiName!,
+          ledCount: 3,
+          isConnected: true,
+          firstBootComplete: true,
+        );
+        
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (context) => DeviceChatScreen(
+              user: widget.user,
+              device: updatedDevice,
+              bleService: widget.bleService,
+            ),
           ),
-        ),
-      );
+        );
+      }
     }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -415,10 +432,10 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
               TextField(
                 controller: _textController,
                 style: TextStyle(fontSize: 18),
-                maxLines: _currentStep == 2 ? 4 : 1,
+                maxLines: _currentStep == 2 ? 6 : 1,  // More lines for origin story
                 decoration: InputDecoration(
                   hintText: _currentStep == 2 
-                    ? 'Example: A grad student, encouraging but not chipper' 
+                    ? 'Tell their backstory: family, upbringing, formative experiences...' 
                     : 'Type here...',
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(12),
