@@ -1,14 +1,11 @@
 import 'package:flutter/material.dart';
-import 'package:speech_to_text/speech_to_text.dart' as stt;
-import 'package:flutter_blue_plus/flutter_blue_plus.dart';
-import '../models/user.dart';
+import 'dart:convert';
 import '../models/device.dart';
+import '../models/user.dart';
 import '../services/ble_service.dart';
 import '../services/api_service.dart';
 import '../services/soven_api_service.dart';
 import 'device_chat.dart';
-import 'dart:convert'; 
-import 'package:http/http.dart' as http; 
 
 class OnboardingScreen extends StatefulWidget {
   final User user;
@@ -27,468 +24,246 @@ class OnboardingScreen extends StatefulWidget {
 }
 
 class _OnboardingScreenState extends State<OnboardingScreen> {
-  final stt.SpeechToText _speech = stt.SpeechToText();
   final ApiService _api = ApiService();
   final SovenApiService _sovenApi = SovenApiService();
   
-  final TextEditingController _textController = TextEditingController();
-  
   int _currentStep = 0;
-  bool _isListening = false;
-  String _currentQuestion = '';
   
-  String? _userName;
-  String? _aiName;
-  String? _personalityDescription;
-  Map<String, dynamic>? _selectedVoice;
+  // Step 1: AI name
+  String _aiName = '';
   
-  List<bool> _ledStates = List.filled(3, false);
+  // Step 2: Origin story
+  String _originStory = '';
+  final TextEditingController _originController = TextEditingController();
+  
+  // Step 3: WiFi configuration
+  String _wifiSsid = '';
+  String _wifiPassword = '';
+  bool _wifiConfigured = false;
+  bool _configuringWifi = false;
+  
+  // Step 4: Completion
+  bool _isRegistering = false;
+  bool _registrationComplete = false;
+  
+  String? _deviceId; // Store after registration
 
   @override
-  void initState() {
-    super.initState();
-    _initializeSpeech();
-    _startOnboarding();
+  void dispose() {
+    _originController.dispose();
+    super.dispose();
   }
 
-  Future<void> _initializeSpeech() async {
-    bool available = await _speech.initialize(
-      onError: (error) => print(">>> Speech error: $error"),
-      onStatus: (status) => print(">>> Speech status: $status"),
-    );
-    
-    if (!available) {
-      print(">>> Speech recognition not available");
-    } else {
-      print(">>> Speech recognition initialized");
-    }
-  }
-
-  Future<void> _startOnboarding() async {
-    // Wait for speech initialization
-    bool available = _speech.isAvailable;
-    int attempts = 0;
-    
-    while (!available && attempts < 10) {
-      await Future.delayed(Duration(milliseconds: 500));
-      available = _speech.isAvailable;
-      attempts++;
-    }
-    
-    _askQuestion(0);
-  }
-
-  void _askQuestion(int step) {
-    setState(() {
-      _currentStep = step;
-      _textController.clear();
-      
-      // Update LED progress (3 LEDs for 3 questions)
-      _ledStates = List.filled(3, false);
-      for (int i = 0; i <= step && i < 3; i++) {
-        _ledStates[i] = true;
-      }
-      
-      // Set question text
-      switch (step) {
-        case 0:
-          _currentQuestion = "What's your name?";
-          break;
-        case 1:
-          _currentQuestion = "What should I call myself?";
-          break;
-        case 2:
-          _currentQuestion = "Tell me about $_aiName's origins\n\nWho raised them? What was their upbringing like?";
-          if (_textController.text.isEmpty) {
-            _textController.text = "Example: $_aiName's mom ran a small diner...";
-          }
-          break;
-        default:
-          _currentQuestion = '';
-      }
-    });
-    
-    // Send LED state to package
-    widget.bleService.sendLedState(_ledStates).catchError((e) {
-      print(">>> LED error: $e");
-    });
-  }
-
-  Future<void> _startListening() async {
-    if (!_isListening && _speech.isAvailable) {
-      await _speech.listen(
-        onResult: (result) {
-          setState(() {
-            _textController.text = result.recognizedWords;
-          });
-        },
-        listenFor: Duration(seconds: 30),
-        pauseFor: Duration(seconds: 3),
-      );
-      
-      setState(() => _isListening = true);
-      print(">>> Listening started");
-    }
-  }
-
-  void _stopListening() {
-    if (_isListening) {
-      _speech.stop();
-      setState(() => _isListening = false);
-      print(">>> Listening stopped");
-    }
-  }
-
-  void _handleContinue() {
-    String input = _textController.text.trim();
-    
-    if (input.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Please provide an answer')),
-      );
-      return;
-    }
-    
-    switch (_currentStep) {
-      case 0:
-        _userName = _parseName(input);
-        print(">>> User name: $_userName");
-        _askQuestion(1);
-        break;
-        
-      case 1:
-        _aiName = _parseName(input);
-        print(">>> AI name: $_aiName");
-        _askQuestion(2);
-        break;
-        
-      case 2:
-        _personalityDescription = input;
-        print(">>> Personality: $_personalityDescription");
-        _completeOnboarding();
-        break;
-    }
-  }
-
-  void _handleBack() {
-    if (_currentStep > 0) {
-      _askQuestion(_currentStep - 1);
-    } else {
-      Navigator.pop(context);
-    }
-  }
-
-  String _parseName(String input) {
-    String lower = input.toLowerCase().trim();
-    
-    // Try to extract name after trigger phrases
-    List<String> triggerPhrases = [
-      'call yourself ',
-      'call you ',
-      'call me ',
-      'my name is ',
-      'i am ',
-      'i\'m ',
-    ];
-    
-    for (String trigger in triggerPhrases) {
-      if (lower.contains(trigger)) {
-        int startIndex = lower.indexOf(trigger) + trigger.length;
-        String remainder = input.substring(startIndex).trim();
-        
-        // Get first word after trigger
-        List<String> words = remainder.split(' ');
-        if (words.isNotEmpty && words.first.isNotEmpty) {
-          String name = words.first.replaceAll(RegExp(r'[^a-zA-Z]'), '');
-          if (name.isNotEmpty) {
-            return name[0].toUpperCase() + name.substring(1).toLowerCase();
-          }
-        }
-      }
-    }
-    
-    // Fallback: just take first word
-    List<String> words = input.trim().split(' ');
-    if (words.isNotEmpty) {
-      String name = words.first.replaceAll(RegExp(r'[^a-zA-Z]'), '');
-      if (name.isNotEmpty) {
-        return name[0].toUpperCase() + name.substring(1).toLowerCase();
-      }
-    }
-    
-    return "Assistant"; // Final fallback
-  }
-
-  Future<void> _completeOnboarding() async {
-      // Show loading - all 3 LEDs on
-      setState(() => _ledStates = List.filled(3, true));
-      await widget.bleService.sendLedState(_ledStates);
-      
-      // Show loading dialog
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (context) => Center(
-          child: Card(
-            child: Padding(
-              padding: EdgeInsets.all(32),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  CircularProgressIndicator(),
-                  SizedBox(height: 16),
-                  Text('Setting up $_aiName...'),
-                ],
+  // ==========================================================================
+  // STEP 0: WELCOME
+  // ==========================================================================
+  
+  Widget _buildStep0Welcome() {
+    return Padding(
+      padding: const EdgeInsets.all(24.0),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            Icons.coffee,
+            size: 80,
+            color: Color(0xFF0088FF),
+          ),
+          SizedBox(height: 40),
+          Text(
+            'Let\'s set up your\n${widget.device.deviceName}',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 32,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          SizedBox(height: 16),
+          Text(
+            'This will only take a minute',
+            style: TextStyle(
+              color: Colors.white.withOpacity(0.7),
+              fontSize: 16,
+            ),
+          ),
+          SizedBox(height: 60),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Color(0xFF0088FF),
+                padding: EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
               ),
+              onPressed: () {
+                setState(() {
+                  _currentStep = 1;
+                });
+              },
+              child: Text('Get Started', style: TextStyle(fontSize: 18)),
             ),
           ),
-        ),
-      );
-      
-      // Send name to ESP32 (it will restart immediately)
-      print(">>> Sending name to ESP32...");
-      try {
-        await widget.bleService.sendCommand('set_name:$_aiName');
-        print(">>> Name sent, device will restart...");
-      } catch (e) {
-        print(">>> Send error (expected if device restarts quickly): $e");
-      }
-      
-      // Wait for ESP32 restart
-      print(">>> Waiting for device to restart and boot...");
-      await Future.delayed(Duration(seconds: 7));
-      
-      // Try to disconnect if still connected
-      try {
-        if (widget.bleService.isConnected) {
-          await widget.bleService.disconnect();
-        }
-      } catch (e) {
-        print(">>> Disconnect: $e (device may have already disconnected)");
-      }
-      
-      await Future.delayed(Duration(seconds: 2));
-      
-      // Reconnect
-      print(">>> Scanning for renamed device...");
-      List<Map<String, dynamic>> bleDevices = await widget.bleService.scanForDevices();
-      
-      var targetDevice = bleDevices.firstWhere(
-        (bleData) => bleData['serial'] == widget.device.serialNumber,
-        orElse: () => <String, dynamic>{},
-      );
-      
-      if (targetDevice.isNotEmpty) {
-        BluetoothDevice bleDevice = targetDevice['device'] as BluetoothDevice;
-        await widget.bleService.connect(bleDevice);
-      }
-      
-      // Register device and capture the device_id from server
-      String? registeredDeviceId;
-      try {
-        print(">>> Registering device in database...");
-        final registrationResponse = await _api.registerDevice(
-          userId: widget.user.userId,
-          deviceType: widget.device.deviceType,
-          deviceName: _aiName!,
-          aiName: _aiName!,
-          bleAddress: _aiName!,
-          ledCount: 3,
-          serialNumber: widget.device.serialNumber!,
-        );
-        registeredDeviceId = registrationResponse['device_id'];
-        print(">>> Device registered with ID: $registeredDeviceId");
-      } catch (e) {
-        print(">>> Registration error: $e");
-      }
-      
-      // ====== ADD THIS NEW SECTION HERE ======
-      // CREATE ENTITY WITH ORIGIN STORY (after registration)
-      if (registeredDeviceId != null) {
-        print(">>> Creating entity with origin story...");
-        try {
-          final response = await http.post(
-            Uri.parse('${SovenApiService.baseUrl}/api/onboarding/create-with-origin'),
-            headers: {
-              'Content-Type': 'application/json',
-              'X-API-Key': SovenApiService.apiKey,
-            },
-            body: jsonEncode({
-              'user_id': widget.user.userId,
-              'device_id': registeredDeviceId,
-              'ai_name': _aiName!,
-              'origin_story': _personalityDescription!,
-              'prefer_american': true,
-            }),
-          );
-          
-          if (response.statusCode == 200) {
-            final result = jsonDecode(response.body);
-            _selectedVoice = result['voice_config'];
-            print(">>> DNA generated: ${result['dna_parameters']}");
-            print(">>> Narrative: ${result['narrative_context']}");
-            print(">>> Voice selected: ${_selectedVoice!['speaker']}");
-          }
-        } catch (e) {
-          print(">>> ERROR creating entity with origin: $e");
-          _selectedVoice = {
-            'voice_id': 'p297',
-            'model': 'tts_models/en/vctk/vits'
-          };
-        }
-      }
-      // ====== END NEW SECTION ======
-      
-      // Close loading dialog
-      if (mounted) Navigator.pop(context);
-      
-      // Navigate to chat
-      if (mounted) {
-        Device updatedDevice = Device(
-          deviceId: registeredDeviceId ?? widget.device.deviceId,
-          userId: widget.user.userId,
-          deviceType: widget.device.deviceType,
-          deviceName: _aiName!,
-          aiName: _aiName!,
-          serialNumber: widget.device.serialNumber,
-          personalityConfig: {
-            'personality': _personalityDescription ?? 'helpful',
-            'interests': ['coffee', 'conversation'],
-            'voice': _selectedVoice ?? {
-              'voice_id': 'p297',
-              'model': 'tts_models/en/vctk/vits'
-            },
-          },
-          bleAddress: _aiName!,
-          ledCount: 3,
-          isConnected: true,
-          firstBootComplete: true,
-        );
-        
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (context) => DeviceChatScreen(
-              user: widget.user,
-              device: updatedDevice,
-              bleService: widget.bleService,
-            ),
-          ),
-        );
-      }
-    }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.white,
-      appBar: AppBar(
-        backgroundColor: Colors.white,
-        elevation: 0,
-        leading: IconButton(
-          icon: Icon(Icons.arrow_back, color: Colors.black87),
-          onPressed: _handleBack,
-        ),
+        ],
       ),
-      body: SafeArea(
-        child: Padding(
-          padding: EdgeInsets.all(24),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // LED Progress Indicators
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: List.generate(3, (index) {
-                  return Container(
-                    margin: EdgeInsets.symmetric(horizontal: 6),
-                    width: 16,
-                    height: 16,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: _ledStates[index] 
-                        ? Color(0xFF0088FF) 
-                        : Colors.grey.shade300,
-                    ),
-                  );
-                }),
+    );
+  }
+
+  // ==========================================================================
+  // STEP 1: AI NAME
+  // ==========================================================================
+  
+  Widget _buildStep1AIName() {
+    return Padding(
+      padding: const EdgeInsets.all(24.0),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'What should I call myself?',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 28,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          SizedBox(height: 12),
+          Text(
+            'Choose a name for your AI assistant',
+            style: TextStyle(
+              color: Colors.white.withOpacity(0.7),
+              fontSize: 16,
+            ),
+          ),
+          SizedBox(height: 40),
+          TextField(
+            autofocus: true,
+            style: TextStyle(color: Colors.white, fontSize: 24),
+            decoration: InputDecoration(
+              hintText: 'e.g., Frank, Stella, Maya',
+              hintStyle: TextStyle(
+                color: Colors.white.withOpacity(0.3),
+                fontSize: 24,
               ),
-              
-              SizedBox(height: 48),
-              
-              // Question
-              Text(
-                _currentQuestion,
-                style: TextStyle(
-                  fontSize: 28,
-                  fontWeight: FontWeight.w600,
-                  color: Colors.black87,
+              enabledBorder: UnderlineInputBorder(
+                borderSide: BorderSide(color: Colors.white.withOpacity(0.3)),
+              ),
+              focusedBorder: UnderlineInputBorder(
+                borderSide: BorderSide(color: Color(0xFF0088FF), width: 2),
+              ),
+            ),
+            onChanged: (value) {
+              setState(() {
+                _aiName = value;
+              });
+            },
+            onSubmitted: (value) {
+              if (value.trim().isNotEmpty) {
+                setState(() {
+                  _aiName = value.trim();
+                  _currentStep = 2;
+                });
+              }
+            },
+          ),
+          SizedBox(height: 40),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Color(0xFF0088FF),
+                padding: EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
                 ),
               ),
-              
-              SizedBox(height: 32),
-              
-              // Text Input Field
-              TextField(
-                controller: _textController,
-                style: TextStyle(fontSize: 18),
-                maxLines: _currentStep == 2 ? 6 : 1,  // More lines for origin story
+              onPressed: _aiName.trim().isNotEmpty
+                  ? () {
+                      setState(() {
+                        _currentStep = 2;
+                      });
+                    }
+                  : null,
+              child: Text('Continue', style: TextStyle(fontSize: 16)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ==========================================================================
+  // STEP 2: ORIGIN STORY
+  // ==========================================================================
+  
+  Widget _buildStep2OriginStory() {
+    return Padding(
+      padding: const EdgeInsets.all(24.0),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(height: 40),
+            Text(
+              'Tell me about $_aiName\'s origins',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 28,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            SizedBox(height: 12),
+            Text(
+              'Who raised them? What shaped their personality?',
+              style: TextStyle(
+                color: Colors.white.withOpacity(0.7),
+                fontSize: 16,
+              ),
+            ),
+            SizedBox(height: 8),
+            Text(
+              'Example: "$_aiName\'s mom was a tired waitress who worked doubles. Dad was never around. $_aiName grew up helping in the kitchen from age 7."',
+              style: TextStyle(
+                color: Colors.white.withOpacity(0.5),
+                fontSize: 14,
+                fontStyle: FontStyle.italic,
+              ),
+            ),
+            SizedBox(height: 32),
+            Container(
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.05),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                  color: Colors.white.withOpacity(0.1),
+                ),
+              ),
+              child: TextField(
+                controller: _originController,
+                maxLines: 8,
+                style: TextStyle(color: Colors.white, fontSize: 16),
                 decoration: InputDecoration(
-                  hintText: _currentStep == 2 
-                    ? 'Tell their backstory: family, upbringing, formative experiences...' 
-                    : 'Type here...',
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
+                  hintText: 'Write $_aiName\'s backstory here...',
+                  hintStyle: TextStyle(
+                    color: Colors.white.withOpacity(0.3),
                   ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide(color: Color(0xFF0088FF), width: 2),
-                  ),
+                  border: InputBorder.none,
+                  contentPadding: EdgeInsets.all(16),
                 ),
+                onChanged: (value) {
+                  setState(() {
+                    _originStory = value;
+                  });
+                },
               ),
-              
-              SizedBox(height: 24),
-              
-              // Voice Input Button
-              GestureDetector(
-                onTapDown: (_) => _startListening(),
-                onTapUp: (_) => _stopListening(),
-                onTapCancel: () => _stopListening(),
-                child: Container(
-                  padding: EdgeInsets.all(20),
-                  decoration: BoxDecoration(
-                    color: _isListening 
-                      ? Color(0xFF0088FF) 
-                      : Colors.grey.shade200,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(
-                        Icons.mic,
-                        color: _isListening ? Colors.white : Colors.black54,
-                        size: 28,
-                      ),
-                      SizedBox(width: 12),
-                      Text(
-                        _isListening ? 'Listening...' : 'Hold to speak',
-                        style: TextStyle(
-                          fontSize: 18,
-                          color: _isListening ? Colors.white : Colors.black54,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              
-              Spacer(),
-              
-              // Continue Button
-              ElevatedButton(
-                onPressed: _handleContinue,
+            ),
+            SizedBox(height: 32),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Color(0xFF0088FF),
                   padding: EdgeInsets.symmetric(vertical: 16),
@@ -496,26 +271,440 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                     borderRadius: BorderRadius.circular(12),
                   ),
                 ),
-                child: Text(
-                  _currentStep == 2 ? 'Complete Setup' : 'Continue',
-                  style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.white,
-                  ),
-                ),
+                onPressed: _originStory.trim().length > 20
+                    ? () async {
+                        // Register device and create personality NOW
+                        await _registerDeviceAndCreatePersonality();
+                      }
+                    : null,
+                child: _isRegistering
+                    ? SizedBox(
+                        height: 20,
+                        width: 20,
+                        child: CircularProgressIndicator(
+                          color: Colors.white,
+                          strokeWidth: 2,
+                        ),
+                      )
+                    : Text('Continue', style: TextStyle(fontSize: 16)),
               ),
-            ],
-          ),
+            ),
+            SizedBox(height: 40),
+          ],
         ),
       ),
     );
   }
 
+  // ==========================================================================
+  // STEP 3: WIFI CONFIGURATION
+  // ==========================================================================
+  
+  Widget _buildStep3WiFi() {
+    return Padding(
+      padding: const EdgeInsets.all(24.0),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(height: 40),
+            Text(
+              'Connect $_aiName to WiFi',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 28,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            SizedBox(height: 12),
+            Text(
+              'This enables voice control when your phone isn\'t nearby',
+              style: TextStyle(
+                color: Colors.white.withOpacity(0.7),
+                fontSize: 16,
+              ),
+            ),
+            SizedBox(height: 40),
+            
+            // WiFi Network Name
+            TextField(
+              style: TextStyle(color: Colors.white),
+              decoration: InputDecoration(
+                labelText: 'WiFi Network Name',
+                labelStyle: TextStyle(color: Colors.white.withOpacity(0.7)),
+                hintText: 'Enter your WiFi SSID',
+                hintStyle: TextStyle(color: Colors.white.withOpacity(0.3)),
+                prefixIcon: Icon(Icons.wifi, color: Color(0xFF0088FF)),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: Colors.white.withOpacity(0.3)),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: Color(0xFF0088FF), width: 2),
+                ),
+              ),
+              onChanged: (value) {
+                setState(() {
+                  _wifiSsid = value;
+                  _wifiConfigured = false;
+                });
+              },
+            ),
+            
+            SizedBox(height: 24),
+            
+            // WiFi Password
+            TextField(
+              obscureText: true,
+              style: TextStyle(color: Colors.white),
+              decoration: InputDecoration(
+                labelText: 'WiFi Password',
+                labelStyle: TextStyle(color: Colors.white.withOpacity(0.7)),
+                hintText: 'Enter password',
+                hintStyle: TextStyle(color: Colors.white.withOpacity(0.3)),
+                prefixIcon: Icon(Icons.lock, color: Color(0xFF0088FF)),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: Colors.white.withOpacity(0.3)),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: Color(0xFF0088FF), width: 2),
+                ),
+              ),
+              onChanged: (value) {
+                setState(() {
+                  _wifiPassword = value;
+                  _wifiConfigured = false;
+                });
+              },
+            ),
+            
+            SizedBox(height: 32),
+            
+            // Configure Button
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _wifiConfigured ? Colors.green : Color(0xFF0088FF),
+                  padding: EdgeInsets.symmetric(vertical: 16),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                onPressed: (_wifiSsid.isNotEmpty && _wifiPassword.isNotEmpty && !_configuringWifi)
+                    ? () async {
+                        await _configureWiFiAndRestart();
+                      }
+                    : null,
+                child: _configuringWifi
+                    ? SizedBox(
+                        height: 20,
+                        width: 20,
+                        child: CircularProgressIndicator(
+                          color: Colors.white,
+                          strokeWidth: 2,
+                        ),
+                      )
+                    : _wifiConfigured
+                        ? Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.check_circle, size: 20),
+                              SizedBox(width: 8),
+                              Text('WiFi Configured', style: TextStyle(fontSize: 16)),
+                            ],
+                          )
+                        : Text('Configure WiFi & Complete Setup', style: TextStyle(fontSize: 16)),
+              ),
+            ),
+            
+            SizedBox(height: 16),
+            
+            // Skip Button
+            Center(
+              child: TextButton(
+                onPressed: () {
+                  setState(() {
+                    _currentStep = 4;
+                    _registrationComplete = true;
+                  });
+                },
+                child: Text(
+                  'Skip WiFi (phone control only)',
+                  style: TextStyle(
+                    color: Colors.white.withOpacity(0.5),
+                    fontSize: 14,
+                  ),
+                ),
+              ),
+            ),
+            
+            SizedBox(height: 40),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ==========================================================================
+  // STEP 4: COMPLETION
+  // ==========================================================================
+  
+  Widget _buildStep4Completion() {
+    return Padding(
+      padding: const EdgeInsets.all(24.0),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            Icons.check_circle,
+            size: 80,
+            color: Colors.green,
+          ),
+          SizedBox(height: 24),
+          Text(
+            'All set!',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 32,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          SizedBox(height: 16),
+          Text(
+            '$_aiName is ready to help',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: Colors.white.withOpacity(0.7),
+              fontSize: 16,
+            ),
+          ),
+          if (_wifiConfigured) ...[
+            SizedBox(height: 16),
+            Text(
+              'Device is restarting and will connect to WiFi...',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.white.withOpacity(0.5),
+                fontSize: 14,
+              ),
+            ),
+          ],
+          SizedBox(height: 60),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Color(0xFF0088FF),
+                padding: EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+              onPressed: () {
+                Navigator.pushReplacement(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => DeviceChatScreen(
+                      user: widget.user,
+                      device: widget.device,
+                      bleService: widget.bleService,
+                    ),
+                  ),
+                );
+              },
+              child: Text('Start Chatting', style: TextStyle(fontSize: 18)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ==========================================================================
+  // HELPER METHODS
+  // ==========================================================================
+
+  Future<void> _registerDeviceAndCreatePersonality() async {
+    setState(() {
+      _isRegistering = true;
+    });
+    
+    try {
+      print('[Onboarding] Starting registration...');
+      
+      // Step 1: Register device in database
+      final registrationResponse = await _api.registerDevice(
+        userId: widget.user.userId,
+        deviceType: widget.device.deviceType,
+        deviceName: widget.device.deviceName,
+        aiName: _aiName,
+        bleAddress: widget.device.bleAddress,
+        ledCount: widget.device.ledCount,
+        serialNumber: widget.device.serialNumber ?? '',
+      );
+      
+      _deviceId = registrationResponse['device_id'];
+      print('[Onboarding] Device registered: $_deviceId');
+      
+      // Step 2: Create personality with DNA system
+      print('[Onboarding] Creating DNA from origin story...');
+      
+      final response = await _sovenApi.createPersonalityWithOrigin(
+        userId: widget.user.userId,
+        deviceId: _deviceId!,
+        aiName: _aiName,
+        originStory: _originStory,
+        preferAmerican: true,
+      );
+      
+      print('[Onboarding] DNA created successfully');
+      print('[Onboarding] Voice: ${response['voice_config']}');
+      
+      // Update device object
+      widget.device.aiName = _aiName;
+      widget.device.firstBootComplete = true;
+      widget.device.personalityConfig['voice'] = response['voice_config'];
+      widget.device.personalityConfig['dna'] = response['dna_parameters'];
+      
+      setState(() {
+        _isRegistering = false;
+        _currentStep = 3; // Move to WiFi configuration
+      });
+      
+    } catch (e) {
+      print('[Onboarding] Registration error: $e');
+      
+      setState(() {
+        _isRegistering = false;
+      });
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Registration failed: $e'),
+          backgroundColor: Colors.red,
+          duration: Duration(seconds: 5),
+        ),
+      );
+    }
+  }
+
+  Future<void> _configureWiFiAndRestart() async {
+    setState(() {
+      _configuringWifi = true;
+    });
+    
+    try {
+      print('[Onboarding] Sending WiFi credentials and AI name...');
+      
+      // Send AI name first
+      await widget.bleService.sendCommand(jsonEncode({
+        'action': 'set_name',
+        'params': {
+          'name': _aiName,
+        }
+      }));
+      
+      await Future.delayed(Duration(milliseconds: 500));
+      
+      // Then send WiFi credentials
+      await widget.bleService.sendCommand(jsonEncode({
+        'action': 'set_wifi',
+        'params': {
+          'ssid': _wifiSsid,
+          'password': _wifiPassword,
+        }
+      }));
+      
+      setState(() {
+        _wifiConfigured = true;
+        _configuringWifi = false;
+        _registrationComplete = true;
+      });
+      
+      print('[Onboarding] WiFi configured, device will restart');
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('$_aiName is restarting with WiFi and voice enabled!'),
+          backgroundColor: Colors.green,
+          duration: Duration(seconds: 3),
+        ),
+      );
+      
+      // Wait a moment then go to completion
+      await Future.delayed(Duration(seconds: 2));
+      setState(() {
+        _currentStep = 4;
+      });
+      
+    } catch (e) {
+      print('[Onboarding] WiFi config error: $e');
+      
+      setState(() {
+        _configuringWifi = false;
+      });
+      
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to configure WiFi. Try again.'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  // ==========================================================================
+  // BUILD
+  // ==========================================================================
+
+  Widget _buildCurrentStep() {
+    switch (_currentStep) {
+      case 0:
+        return _buildStep0Welcome();
+      case 1:
+        return _buildStep1AIName();
+      case 2:
+        return _buildStep2OriginStory();
+      case 3:
+        return _buildStep3WiFi();
+      case 4:
+        return _buildStep4Completion();
+      default:
+        return Container();
+    }
+  }
+
   @override
-  void dispose() {
-    _speech.stop();
-    _textController.dispose();
-    super.dispose();
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Color(0xFF1A1A1A),
+      appBar: _currentStep > 0 && _currentStep < 4
+          ? AppBar(
+              backgroundColor: Color(0xFF1A1A1A),
+              elevation: 0,
+              leading: IconButton(
+                icon: Icon(Icons.arrow_back, color: Colors.white),
+                onPressed: () {
+                  if (_currentStep > 0 && !_isRegistering) {
+                    setState(() {
+                      _currentStep--;
+                    });
+                  }
+                },
+              ),
+              title: Text(
+                'Step $_currentStep of 4',
+                style: TextStyle(color: Colors.white.withOpacity(0.7)),
+              ),
+            )
+          : null,
+      body: SafeArea(
+        child: _buildCurrentStep(),
+      ),
+    );
   }
 }
